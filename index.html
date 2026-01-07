@@ -1,3 +1,101 @@
-<html>
-<h1> COM682 Cloud Computing </h1>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>UniShare – CW2</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 40px; }
+    input, button { margin: 5px 0; }
+    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { border: 1px solid #ccc; padding: 8px; }
+    th { background: #f4f4f4; }
+  </style>
+</head>
+<body>
+
+<h1>UniShare – File Upload</h1>
+
+<h3>Upload File</h3>
+<input type="text" id="title" placeholder="Title"><br>
+<input type="text" id="tags" placeholder="Tags (comma separated)"><br>
+<input type="file" id="fileInput"><br>
+<button onclick="uploadFile()">Upload</button>
+
+<h3>Uploaded Files</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Title</th>
+      <th>Tags</th>
+      <th>Uploaded</th>
+      <th>Download</th>
+    </tr>
+  </thead>
+  <tbody id="fileTable"></tbody>
+</table>
+
+<script>
+const API_BASE = "https://YOUR_FUNCTION_BASE_URL";
+
+const STORAGE_ACCOUNT = "unisharestorage";
+const BLOB_CONTAINER = "documents";
+
+function blobUrlFromPath(blobPath) {
+  const blobName = blobPath.split("/").slice(1).join("/");
+  return `https://${STORAGE_ACCOUNT}.blob.core.windows.net/${BLOB_CONTAINER}/${blobName}`;
+}
+
+async function loadFiles() {
+  const res = await fetch(`${API_BASE}/api/list_files`);
+  const files = await res.json();
+  const table = document.getElementById("fileTable");
+  table.innerHTML = "";
+
+  files.forEach(f => {
+    const url = blobUrlFromPath(f.blobPath);
+    table.innerHTML += `
+      <tr>
+        <td>${f.title}</td>
+        <td>${(f.tags || []).join(", ")}</td>
+        <td>${new Date(f.uploadedAt).toLocaleString()}</td>
+        <td><a href="${url}" target="_blank">Download</a></td>
+      </tr>`;
+  });
+}
+
+async function uploadFile() {
+  const file = document.getElementById("fileInput").files[0];
+  if (!file) {
+    alert("Select a file");
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const base64 = reader.result.split(",")[1];
+
+    const body = {
+      title: document.getElementById("title").value,
+      tags: document.getElementById("tags").value.split(",").map(t => t.trim()),
+      filename: file.name,
+      contentType: file.type,
+      contentBase64: base64
+    };
+
+    await fetch(`${API_BASE}/api/files`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+    loadFiles();
+  };
+
+  reader.readAsDataURL(file);
+}
+
+loadFiles();
+</script>
+
+</body>
 </html>
