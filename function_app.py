@@ -40,7 +40,7 @@ def list_files(req: func.HttpRequest) -> func.HttpResponse:
         client = CosmosClient(endpoint, credential=key)
         container = client.get_database_client(db_name).get_container_client(container_name)
 
-        query = "SELECT c.id, c.title, c.institution, c.tags, c.blobPath, c.uploadedAt FROM c"
+        query = "SELECT c.id, c.title, c.description, c.institution, c.tags, c.blobPath, c.uploadedAt FROM c"
         items = list(container.query_items(query=query, enable_cross_partition_query=True))
 
         return func.HttpResponse(json.dumps(items), status_code=200, mimetype="application/json")
@@ -71,6 +71,7 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         data = req.get_json()
 
         title = (data.get("title") or "").strip()
+        description = (data.get("description") or "").strip()
         tags = data.get("tags") or []
         institution = (data.get("institution") or "").strip()
         filename = (data.get("filename") or "").strip()
@@ -129,6 +130,7 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         doc = {
             "id": file_id,
             "title": title,
+            "description": description,
             "institution": institution,
             "tags": tags,
             "blobPath": blob_path,
@@ -163,6 +165,7 @@ def update_file(req: func.HttpRequest) -> func.HttpResponse:
 
         # Optional fields
         title = data.get("title")
+        description = data.get("description")
         tags = data.get("tags")
         institution = data.get("institution")
 
@@ -180,6 +183,9 @@ def update_file(req: func.HttpRequest) -> func.HttpResponse:
 
         if title is not None:
             item["title"] = str(title).strip()
+
+        if description is not None:
+            item["description"] = str(description).strip()
 
         if tags is not None:
             # trim + remove blanks + normalize (optional: lower-case)
@@ -236,3 +242,6 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.exception("Delete failed")
         return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
+
+
+#Testing GitHub CI/CD Workflow
