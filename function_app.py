@@ -11,6 +11,7 @@ from azure.storage.blob import BlobServiceClient, ContentSettings
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
+# Connects Azure Cosmos Storage
 def get_cosmos_container():
     endpoint = os.environ["COSMOS_ENDPOINT"]
     key = os.environ["COSMOS_KEY"]
@@ -20,7 +21,7 @@ def get_cosmos_container():
     client = CosmosClient(endpoint, credential=key)
     return client.get_database_client(db_name).get_container_client(container_name)
 
-
+# Connects Azure Blob Storage
 def get_blob_container_client():
     storage_conn = os.environ["STORAGE_CONNECTION_STRING"]
     blob_container = os.environ["BLOB_CONTAINER"]
@@ -28,8 +29,8 @@ def get_blob_container_client():
     blob_service = BlobServiceClient.from_connection_string(storage_conn)
     return blob_service.get_container_client(blob_container)
 
-
-@app.route(route="list_files", methods=["GET"])
+# REST API and CRUD Operations
+@app.route(route="list_files", methods=["GET"]) # Lists all files
 def list_files(req: func.HttpRequest) -> func.HttpResponse:
     try:
         endpoint = os.environ["COSMOS_ENDPOINT"]
@@ -50,15 +51,11 @@ def list_files(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
 
-@app.route(route="files", methods=["POST"])
+@app.route(route="files", methods=["POST"]) # Upload new files
 def upload_file(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    POST /api/files
-    Body: JSON with { title, tags, filename, contentType, contentBase64 }
-    Uploads file bytes to Blob Storage and inserts metadata into Cosmos DB.
-    """
+ 
     try:
-        # ---- Read env vars ----
+        # Reads environmental variables from Azure
         cosmos_endpoint = os.environ["COSMOS_ENDPOINT"]
         cosmos_key = os.environ["COSMOS_KEY"]
         cosmos_db = os.environ["COSMOS_DB"]
@@ -67,7 +64,7 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         storage_conn = os.environ["STORAGE_CONNECTION_STRING"]
         blob_container = os.environ["BLOB_CONTAINER"]
 
-        # ---- Parse request JSON ----
+        # JSON Parse Request
         data = req.get_json()
 
         title = (data.get("title") or "").strip()
@@ -92,7 +89,6 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
                 mimetype="application/json",
             )
 
-        # ---- Decode file bytes ----
         try:
             file_bytes = base64.b64decode(content_b64, validate=True)
         except Exception:
@@ -102,16 +98,16 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
                 mimetype="application/json",
             )
 
-        # ---- Upload to Blob Storage ----
+        # Upload File to Blob Storage
         file_id = str(uuid.uuid4())
         safe_name = filename.replace("\\", "_").replace("/", "_")
-        blob_name = f"{file_id}_{safe_name}"  # stored inside container
-        blob_path = f"{blob_container}/{blob_name}"  # what we store in Cosmos
+        blob_name = f"{file_id}_{safe_name}"
+        blob_path = f"{blob_container}/{blob_name}"
 
         blob_service = BlobServiceClient.from_connection_string(storage_conn)
         container_client = blob_service.get_container_client(blob_container)
 
-        # Optional: ensure container exists (safe if it already exists)
+        # Exception Error Handling, Checking if Container exists
         try:
             container_client.create_container()
         except Exception:
@@ -124,7 +120,7 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
             content_settings=ContentSettings(content_type=content_type),
         )
 
-        # ---- Insert metadata into Cosmos ----
+        # Inserts metadata into CosmosDB
         uploaded_at = datetime.now(timezone.utc).isoformat()
 
         doc = {
@@ -150,7 +146,7 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         logging.exception("Upload failed")
         return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
-@app.route(route="files/{id}", methods=["PATCH"])
+@app.route(route="files/{id}", methods=["PATCH"]) # Updating/Editting Details of File
 def update_file(req: func.HttpRequest) -> func.HttpResponse:
     try:
         file_id = req.route_params.get("id")
@@ -160,10 +156,10 @@ def update_file(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=400,
                 mimetype="application/json",
             )
-
+        
+        #JSON Parse Request
         data = req.get_json()
 
-        # Optional fields
         title = data.get("title")
         description = data.get("description")
         tags = data.get("tags")
@@ -178,7 +174,7 @@ def update_file(req: func.HttpRequest) -> func.HttpResponse:
 
         container = get_cosmos_container()
 
-        # Partition key is /id
+        # Partition key is "/id", set in Azure
         item = container.read_item(item=file_id, partition_key=file_id)
 
         if title is not None:
@@ -188,7 +184,6 @@ def update_file(req: func.HttpRequest) -> func.HttpResponse:
             item["description"] = str(description).strip()
 
         if tags is not None:
-            # trim + remove blanks + normalize (optional: lower-case)
             item["tags"] = [str(t).strip() for t in tags if str(t).strip()]
 
         if institution is not None:
@@ -203,7 +198,7 @@ def update_file(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
 
-@app.route(route="files/{id}", methods=["DELETE"])
+@app.route(route="files/{id}", methods=["DELETE"]) # Delete File by ID
 def delete_file(req: func.HttpRequest) -> func.HttpResponse:
     try:
         file_id = req.route_params.get("id")
@@ -216,11 +211,10 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
 
         cosmos_container = get_cosmos_container()
 
-        # Read item so we know which blob to delete
+        # Reads item by id, to ensure it matches
         item = cosmos_container.read_item(item=file_id, partition_key=file_id)
         blob_path = item.get("blobPath") or ""
 
-        # blobPath format: "<container>/<blobName>"
         blob_name = blob_path.split("/", 1)[1] if "/" in blob_path else ""
 
         if blob_name:
@@ -242,6 +236,3 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.exception("Delete failed")
         return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
-
-
-#Testing GitHub CI/CD Workflow

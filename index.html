@@ -49,7 +49,6 @@ const STORAGE_ACCOUNT = "unisharestorage";
 const BLOB_CONTAINER = "documents";
 
 function blobUrlFromPath(blobPath) {
-  // expected format: "documents/<blobName>"
   const blobName = (blobPath || "").split("/").slice(1).join("/");
   return `https://${STORAGE_ACCOUNT}.blob.core.windows.net/${BLOB_CONTAINER}/${blobName}`;
 }
@@ -62,7 +61,6 @@ function parseTags(str) {
 }
 
 function escapeHtml(text) {
-  // basic protection for rendering user-provided fields
   const div = document.createElement("div");
   div.innerText = text ?? "";
   return div.innerHTML;
@@ -137,7 +135,6 @@ async function uploadFile() {
         throw new Error(`Upload failed: ${res.status} ${txt}`);
       }
 
-      // Clear inputs
       document.getElementById("title").value = "";
       document.getElementById("description").value = "";
       document.getElementById("institution").value = "";
@@ -159,9 +156,8 @@ async function uploadFile() {
 }
 
 async function editFile(id) {
-  // Simple prompt-based editor (CW2-friendly, minimal UI)
+
   try {
-    // Fetch current list and locate the item (simple approach)
     const res = await fetch(`${API_BASE}/api/list_files`);
     if (!res.ok) throw new Error(`List failed: ${res.status}`);
     const files = await res.json();
@@ -173,7 +169,7 @@ async function editFile(id) {
     }
 
     const newTitle = prompt("New title (leave blank to keep current):", current.title || "");
-    if (newTitle === null) return; // cancelled
+    if (newTitle === null) return;
 
     const newDescription = prompt("New description (leave blank to keep current):", current.description || "");
     if (newDescription === null) return;
@@ -184,8 +180,7 @@ async function editFile(id) {
     const newTagsStr = prompt("New tags (comma separated, leave blank to keep current):", (current.tags || []).join(", "));
     if (newTagsStr === null) return;
 
-    // Build PATCH body with only fields you want to update.
-    // Here: treat blank as "keep current" to avoid accidentally wiping fields.
+
     const patchBody = {};
 
     if ((newTitle ?? "").trim() !== (current.title || "").trim()) {
@@ -198,7 +193,6 @@ async function editFile(id) {
       patchBody.institution = (newInstitution ?? "").trim();
     }
 
-    // Tags: compare normalized arrays
     const newTags = parseTags(newTagsStr);
     const curTags = (current.tags || []).map(t => String(t).trim()).filter(Boolean);
     const tagsChanged = JSON.stringify(newTags) !== JSON.stringify(curTags);
