@@ -5,10 +5,13 @@
   <title>UniShare – CW2</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 40px; }
-    input, button { margin: 5px 0; }
+    input, button { margin: 5px 0; width: 320px; max-width: 100%; }
     table { border-collapse: collapse; width: 100%; margin-top: 20px; }
-    th, td { border: 1px solid #ccc; padding: 8px; }
+    th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
     th { background: #f4f4f4; }
+    .row { margin-bottom: 8px; }
+    .actions button { width: auto; margin-right: 6px; }
+    .muted { color: #666; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -16,19 +19,25 @@
 <h1>UniShare – File Upload</h1>
 
 <h3>Upload File</h3>
-<input type="text" id="title" placeholder="Title"><br>
-<input type="text" id="tags" placeholder="Tags (comma separated)"><br>
-<input type="file" id="fileInput"><br>
-<button onclick="uploadFile()">Upload</button>
+<div class="row"><input type="text" id="title" placeholder="Title"></div>
+<div class="row"><input type="text" id="description" placeholder="Description"></div>
+<div class="row"><input type="text" id="institution" placeholder="Institution (e.g., Ulster University)"></div>
+<div class="row"><input type="text" id="tags" placeholder="Tags (comma separated)"></div>
+<div class="row"><input type="file" id="fileInput"></div>
+<div class="row"><button id="uploadBtn" onclick="uploadFile()">Upload</button></div>
+<div class="muted">Tip: Use Edit to change metadata later (title/description/institution/tags).</div>
 
 <h3>Uploaded Files</h3>
 <table>
   <thead>
     <tr>
       <th>Title</th>
+      <th>Description</th>
+      <th>Institution</th>
       <th>Tags</th>
       <th>Uploaded</th>
       <th>Download</th>
+      <th>Actions</th>
     </tr>
   </thead>
   <tbody id="fileTable"></tbody>
@@ -36,62 +45,208 @@
 
 <script>
 const API_BASE = "https://unishare-functions-eygmeya7hrbrfgfe.uksouth-01.azurewebsites.net";
-
 const STORAGE_ACCOUNT = "unisharestorage";
 const BLOB_CONTAINER = "documents";
 
 function blobUrlFromPath(blobPath) {
-  const blobName = blobPath.split("/").slice(1).join("/");
+  // expected format: "documents/<blobName>"
+  const blobName = (blobPath || "").split("/").slice(1).join("/");
   return `https://${STORAGE_ACCOUNT}.blob.core.windows.net/${BLOB_CONTAINER}/${blobName}`;
 }
 
+function parseTags(str) {
+  return (str || "")
+    .split(",")
+    .map(t => t.trim())
+    .filter(Boolean);
+}
+
+function escapeHtml(text) {
+  // basic protection for rendering user-provided fields
+  const div = document.createElement("div");
+  div.innerText = text ?? "";
+  return div.innerHTML;
+}
+
 async function loadFiles() {
-  const res = await fetch(`${API_BASE}/api/list_files`);
-  const files = await res.json();
   const table = document.getElementById("fileTable");
   table.innerHTML = "";
 
-  files.forEach(f => {
-    const url = blobUrlFromPath(f.blobPath);
-    table.innerHTML += `
-      <tr>
-        <td>${f.title}</td>
-        <td>${(f.tags || []).join(", ")}</td>
-        <td>${new Date(f.uploadedAt).toLocaleString()}</td>
-        <td><a href="${url}" target="_blank">Download</a></td>
-      </tr>`;
-  });
+  try {
+    const res = await fetch(`${API_BASE}/api/list_files`);
+    if (!res.ok) throw new Error(`List failed: ${res.status}`);
+    const files = await res.json();
+
+    files.forEach(f => {
+      const url = f.blobPath ? blobUrlFromPath(f.blobPath) : "";
+      table.innerHTML += `
+        <tr>
+          <td>${escapeHtml(f.title || "")}</td>
+          <td>${escapeHtml(f.description || "")}</td>
+          <td>${escapeHtml(f.institution || "")}</td>
+          <td>${escapeHtml((f.tags || []).join(", "))}</td>
+          <td>${f.uploadedAt ? escapeHtml(new Date(f.uploadedAt).toLocaleString()) : ""}</td>
+          <td>${f.blobPath ? `<a href="${url}" target="_blank">Download</a>` : ""}</td>
+          <td class="actions">
+            <button onclick="editFile('${f.id}')">Edit</button>
+            <button onclick="deleteFile('${f.id}')">Delete</button>
+          </td>
+        </tr>`;
+    });
+
+  } catch (err) {
+    console.error(err);
+    alert("Failed to load files. Check console / API.");
+  }
 }
 
 async function uploadFile() {
+  const btn = document.getElementById("uploadBtn");
   const file = document.getElementById("fileInput").files[0];
   if (!file) {
     alert("Select a file");
     return;
   }
 
+  btn.disabled = true;
+  btn.textContent = "Uploading...";
+
   const reader = new FileReader();
   reader.onload = async () => {
-    const base64 = reader.result.split(",")[1];
+    try {
+      const base64 = reader.result.split(",")[1];
 
-    const body = {
-      title: document.getElementById("title").value,
-      tags: document.getElementById("tags").value.split(",").map(t => t.trim()),
-      filename: file.name,
-      contentType: file.type,
-      contentBase64: base64
-    };
+      const body = {
+        title: document.getElementById("title").value.trim(),
+        description: document.getElementById("description").value.trim(),
+        institution: document.getElementById("institution").value.trim(),
+        tags: parseTags(document.getElementById("tags").value),
+        filename: file.name,
+        contentType: file.type || "application/octet-stream",
+        contentBase64: base64
+      };
 
-    await fetch(`${API_BASE}/api/files`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
+      const res = await fetch(`${API_BASE}/api/files`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
 
-    loadFiles();
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`Upload failed: ${res.status} ${txt}`);
+      }
+
+      // Clear inputs
+      document.getElementById("title").value = "";
+      document.getElementById("description").value = "";
+      document.getElementById("institution").value = "";
+      document.getElementById("tags").value = "";
+      document.getElementById("fileInput").value = "";
+
+      await loadFiles();
+
+    } catch (err) {
+      console.error(err);
+      alert("Upload failed. Check console / API.");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Upload";
+    }
   };
 
   reader.readAsDataURL(file);
+}
+
+async function editFile(id) {
+  // Simple prompt-based editor (CW2-friendly, minimal UI)
+  try {
+    // Fetch current list and locate the item (simple approach)
+    const res = await fetch(`${API_BASE}/api/list_files`);
+    if (!res.ok) throw new Error(`List failed: ${res.status}`);
+    const files = await res.json();
+    const current = files.find(x => x.id === id);
+    if (!current) {
+      alert("Item not found in list (refreshing).");
+      await loadFiles();
+      return;
+    }
+
+    const newTitle = prompt("New title (leave blank to keep current):", current.title || "");
+    if (newTitle === null) return; // cancelled
+
+    const newDescription = prompt("New description (leave blank to keep current):", current.description || "");
+    if (newDescription === null) return;
+
+    const newInstitution = prompt("New institution (leave blank to keep current):", current.institution || "");
+    if (newInstitution === null) return;
+
+    const newTagsStr = prompt("New tags (comma separated, leave blank to keep current):", (current.tags || []).join(", "));
+    if (newTagsStr === null) return;
+
+    // Build PATCH body with only fields you want to update.
+    // Here: treat blank as "keep current" to avoid accidentally wiping fields.
+    const patchBody = {};
+
+    if ((newTitle ?? "").trim() !== (current.title || "").trim()) {
+      patchBody.title = (newTitle ?? "").trim();
+    }
+    if ((newDescription ?? "").trim() !== (current.description || "").trim()) {
+      patchBody.description = (newDescription ?? "").trim();
+    }
+    if ((newInstitution ?? "").trim() !== (current.institution || "").trim()) {
+      patchBody.institution = (newInstitution ?? "").trim();
+    }
+
+    // Tags: compare normalized arrays
+    const newTags = parseTags(newTagsStr);
+    const curTags = (current.tags || []).map(t => String(t).trim()).filter(Boolean);
+    const tagsChanged = JSON.stringify(newTags) !== JSON.stringify(curTags);
+    if (tagsChanged) {
+      patchBody.tags = newTags;
+    }
+
+    if (Object.keys(patchBody).length === 0) {
+      alert("No changes to save.");
+      return;
+    }
+
+    const patchRes = await fetch(`${API_BASE}/api/files/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patchBody)
+    });
+
+    if (!patchRes.ok) {
+      const txt = await patchRes.text();
+      throw new Error(`PATCH failed: ${patchRes.status} ${txt}`);
+    }
+
+    await loadFiles();
+    alert("Updated!");
+
+  } catch (err) {
+    console.error(err);
+    alert("Edit failed. Check console / API.");
+  }
+}
+
+async function deleteFile(id) {
+  const ok = confirm("Delete this file (blob + metadata)?");
+  if (!ok) return;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/files/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`DELETE failed: ${res.status} ${txt}`);
+    }
+    await loadFiles();
+    alert("Deleted!");
+  } catch (err) {
+    console.error(err);
+    alert("Delete failed. Check console / API.");
+  }
 }
 
 loadFiles();
