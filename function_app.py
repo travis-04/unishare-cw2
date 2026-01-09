@@ -5,6 +5,7 @@ import os
 import base64
 import uuid
 from datetime import datetime, timezone
+import requests
 
 from azure.cosmos import CosmosClient
 from azure.storage.blob import BlobServiceClient, ContentSettings
@@ -29,8 +30,41 @@ def get_blob_container_client():
     blob_service = BlobServiceClient.from_connection_string(storage_conn)
     return blob_service.get_container_client(blob_container)
 
+# Azure AI Search Helpers
+def get_search_config():
+    return {
+        "endpoint": os.environ["SEARCH_ENDPOINT"].rstrip("/"),
+        "key": os.environ["SEARCH_ADMIN_KEY"],
+        "index": os.environ["SEARCH_INDEX"],
+        "api_version": "2023-07-01-Preview"
+    }
+
+def search_headers():
+    cfg = get_search_config()
+    return {
+        "Content-Type": "application/json",
+        "api-key": cfg["key"]
+    }
+
+def ai_search_index(action: str, doc: dict):
+    """
+    action: mergeOrUpload | merge | delete
+    doc: must include at least {"id": "..."} for delete, and fields for merge/mergeOrUpload
+    """
+    cfg = get_search_config()
+    url = f'{cfg["endpoint"]}/indexes/{cfg["index"]}/docs/index?api-version={cfg["api_version"]}'
+    payload = {"value": [{"@search.action": action, **doc}]}
+
+    # Best-effort indexing: if Search is down, API shouldn't fully fail CW2 demo
+    try:
+        resp = requests.post(url, headers=search_headers(), json=payload, timeout=10)
+        if resp.status_code >= 400:
+            logging.warning("AI Search index action failed (%s): %s", resp.status_code, resp.text)
+    except Exception as e:
+        logging.warning("AI Search request failed: %s", str(e))
+
 # REST API and CRUD Operations
-@app.route(route="list_files", methods=["GET"]) # Lists all files
+@app.route(route="list_files", methods=["GET"])  # Lists all files
 def list_files(req: func.HttpRequest) -> func.HttpResponse:
     try:
         endpoint = os.environ["COSMOS_ENDPOINT"]
@@ -51,9 +85,8 @@ def list_files(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
 
-@app.route(route="files", methods=["POST"]) # Upload new files
+@app.route(route="files", methods=["POST"])  # Upload new files
 def upload_file(req: func.HttpRequest) -> func.HttpResponse:
- 
     try:
         # Reads environmental variables from Azure
         cosmos_endpoint = os.environ["COSMOS_ENDPOINT"]
@@ -140,13 +173,25 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         container = cosmos.get_database_client(cosmos_db).get_container_client(cosmos_container)
         container.create_item(body=doc)
 
+        # Index Metadata into Azure AI Search (Advanced Feature)
+        ai_search_index("mergeOrUpload", {
+            "id": doc["id"],
+            "title": doc.get("title"),
+            "description": doc.get("description"),
+            "institution": doc.get("institution"),
+            "tags": doc.get("tags"),
+            "uploadedAt": doc.get("uploadedAt"),
+            "blobPath": doc.get("blobPath"),
+        })
+
         return func.HttpResponse(json.dumps(doc), status_code=201, mimetype="application/json")
 
     except Exception as e:
         logging.exception("Upload failed")
         return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
-@app.route(route="files/{id}", methods=["PATCH"]) # Updating/Editting Details of File
+
+@app.route(route="files/{id}", methods=["PATCH"])  # Updating/Editting Details of File
 def update_file(req: func.HttpRequest) -> func.HttpResponse:
     try:
         file_id = req.route_params.get("id")
@@ -156,8 +201,8 @@ def update_file(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=400,
                 mimetype="application/json",
             )
-        
-        #JSON Parse Request
+
+        # JSON Parse Request
         data = req.get_json()
 
         title = data.get("title")
@@ -191,6 +236,15 @@ def update_file(req: func.HttpRequest) -> func.HttpResponse:
 
         updated = container.replace_item(item=file_id, body=item)
 
+        # Update Metadata in Azure AI Search (Advanced Feature)
+        ai_search_index("merge", {
+            "id": updated["id"],
+            "title": updated.get("title"),
+            "description": updated.get("description"),
+            "institution": updated.get("institution"),
+            "tags": updated.get("tags"),
+        })
+
         return func.HttpResponse(json.dumps(updated), status_code=200, mimetype="application/json")
 
     except Exception as e:
@@ -198,7 +252,7 @@ def update_file(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
 
-@app.route(route="files/{id}", methods=["DELETE"]) # Delete File by ID
+@app.route(route="files/{id}", methods=["DELETE"])  # Delete File by ID
 def delete_file(req: func.HttpRequest) -> func.HttpResponse:
     try:
         file_id = req.route_params.get("id")
@@ -227,6 +281,9 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
 
         cosmos_container.delete_item(item=file_id, partition_key=file_id)
 
+        # Remove from Azure AI Search Index (Advanced Feature)
+        ai_search_index("delete", {"id": file_id})
+
         return func.HttpResponse(
             json.dumps({"deleted": True, "id": file_id}),
             status_code=200,
@@ -235,4 +292,45 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
 
     except Exception as e:
         logging.exception("Delete failed")
+        return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
+
+
+@app.route(route="search", methods=["GET"])  # Search Files (Metadata Only)
+def search_files(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        q = req.params.get("q")
+        if not q:
+            return func.HttpResponse(
+                json.dumps({"error": "Missing query parameter: q"}),
+                status_code=400,
+                mimetype="application/json",
+            )
+
+        cfg = get_search_config()
+        url = f'{cfg["endpoint"]}/indexes/{cfg["index"]}/docs/search?api-version={cfg["api_version"]}'
+
+        res = requests.post(
+            url,
+            headers=search_headers(),
+            json={
+                "search": q,
+                "searchFields": "title,description,institution,tags",
+                "top": 20
+            },
+            timeout=10
+        )
+
+        if res.status_code >= 400:
+            logging.warning("AI Search query failed (%s): %s", res.status_code, res.text)
+            return func.HttpResponse(
+                json.dumps({"error": "Search query failed", "details": res.text}),
+                status_code=500,
+                mimetype="application/json",
+            )
+
+        results = res.json().get("value", [])
+        return func.HttpResponse(json.dumps(results), status_code=200, mimetype="application/json")
+
+    except Exception as e:
+        logging.exception("Search failed")
         return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
